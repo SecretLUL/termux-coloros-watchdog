@@ -133,6 +133,7 @@ If you have a different device or ColorOS version, please open an issue with the
 ## Related
 
 - [termux/termux-app#5150](https://github.com/termux/termux-app/issues/5150): processes killed on Android 15 despite wake lock and exemptions
+- [termux/termux-app#4219](https://github.com/termux/termux-app/issues/4219): Termux killed on OnePlus/ColorOS 15. That is a different mechanism (kills at startup / proot, fixed by OS updates), not the background `o-kill` described here
 - [dontkillmyapp.com/oppo](https://dontkillmyapp.com/oppo)
 - [Termux no longer works on OxygenOS/ColorOS 15](https://oxygenupdater.com/article/484/)
 
