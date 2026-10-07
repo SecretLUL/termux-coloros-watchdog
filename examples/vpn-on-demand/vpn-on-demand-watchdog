@@ -1,0 +1,4 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Run every 15 min by termux-job-scheduler (survives reboots): restarts
+# vpn-on-demand if Android/ColorOS killed it.
+exec "$HOME/.local/bin/vpn-on-demand" watchdog

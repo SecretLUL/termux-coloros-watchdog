@@ -1,0 +1,24 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# termux-watchdog: keep a long-running Termux command alive on Android skins
+# (ColorOS, OxygenOS, ...) that kill Termux despite all battery exemptions.
+#
+# Edit NAME and the command at the bottom, then let termux-job-scheduler
+# (Termux:API) run this script every 15 minutes - see README.md.
+#
+# The command must run in the FOREGROUND (no "&", no daemonizing). It inherits
+# the lock on fd 9, so the lock is held exactly as long as the command lives
+# and further watchdog runs exit immediately.
+
+NAME=my-daemon
+STATE_DIR="$HOME/.local/state/termux-watchdog"
+LOG="$STATE_DIR/$NAME.log"
+
+mkdir -p "$STATE_DIR"
+exec 9>"$STATE_DIR/$NAME.lock"
+flock -n 9 || exit 0 # still running
+
+echo "$(date '+%F %T') $NAME not running, starting" >>"$LOG"
+termux-wake-lock 2>/dev/null
+
+# --- your command, in the foreground: ---
+exec "$HOME/.local/bin/my-daemon" >>"$LOG" 2>&1

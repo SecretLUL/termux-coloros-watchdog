@@ -1,0 +1,6 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Copy to ~/.termux/boot/ - run by Termux:Boot after the device has booted.
+termux-wake-lock
+mkdir -p "$HOME/.local/state/vpn-on-demand"
+echo "$(date '+%F %T') boot script (Termux:Boot) fired" >> "$HOME/.local/state/vpn-on-demand/log"
+exec "$HOME/.local/bin/vpn-on-demand" watchdog
