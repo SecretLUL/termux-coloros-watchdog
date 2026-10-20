@@ -13,6 +13,7 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/vpn-on-demand"
 LOG="$STATE_DIR/log"
 LOCK="$STATE_DIR/lock"
 PIDFILE="$STATE_DIR/pid"
+WATCHDOG_STAMP="$STATE_DIR/watchdog" # touched by every run of the watchdog job
 RECEIVER="com.tailscale.ipn/.IPNReceiver"
 
 mkdir -p "$STATE_DIR" "$(dirname "$CONF")"
@@ -137,6 +138,14 @@ apply() {
 	return 1
 }
 
+# (Re-)register the periodic watchdog job. ColorOS force-stops Termux:API now
+# and then ("highpower ... from com.oplus.battery"), which deletes all its
+# jobs. Scheduling the same job id again just replaces the job.
+schedule_watchdog() {
+	timeout 30 termux-job-scheduler --job-id 4711 --script "$HOME/.local/bin/vpn-on-demand-watchdog" \
+		--period-ms 900000 --persisted true --network none --battery-not-low false >/dev/null 2>&1 9>&-
+}
+
 run_loop() {
 	exec 9>"$LOCK"
 	flock -n 9 || { echo "already running" >&2; exit 1; }
@@ -146,6 +155,7 @@ run_loop() {
 
 	local last_ip="-" last_ctx="" last_check=0 now ip res want ctx delay
 	local pend_want="" pend_ctx="" pend_since=0
+	local last_wd_check=0 wd_sched=0 wd
 	while :; do
 		ip=$(wifi_ip)
 		now=$(date +%s)
@@ -175,6 +185,17 @@ run_loop() {
 				pend_want=""
 			fi
 		fi
+		# The watchdog job runs every 15 min. If it has not run for 45 min, it
+		# was deleted (Termux:API force-stopped), so schedule it again.
+		if [ $((now - last_wd_check)) -ge 300 ]; then
+			last_wd_check=$now
+			wd=$(date -r "$WATCHDOG_STAMP" +%s 2>/dev/null || echo 0)
+			if [ $((now - wd)) -ge 2700 ] && [ $((now - wd_sched)) -ge 2700 ]; then
+				log "watchdog job did not run since $(date -r "$WATCHDOG_STAMP" '+%F %T' 2>/dev/null || echo unknown), scheduling it again"
+				schedule_watchdog
+				wd_sched=$now
+			fi
+		fi
 		touch "$PIDFILE" # heartbeat: the watchdog logs when the daemon was last alive
 		sleep "$INTERVAL" 9>&- &
 		wait $! # interruptible, so "stop" takes effect immediately
@@ -193,6 +214,7 @@ watchdog)
 	# Called by Termux:Boot and periodically by termux-job-scheduler. Runs the
 	# daemon in the foreground, so it is a Termux task, unless it is already
 	# running or was stopped on purpose ("stop").
+	touch "$WATCHDOG_STAMP"
 	daemon_pid >/dev/null && exit 0
 	[ -e "$STATE_DIR/disabled" ] && exit 0
 	log "watchdog: daemon not running (last alive: $(date -r "$PIDFILE" '+%F %T' 2>/dev/null || echo unknown)), starting"
@@ -223,6 +245,7 @@ stop)
 restart) "$0" stop; "$0" start ;;
 status)
 	if pid=$(daemon_pid); then echo "daemon: running (pid $pid)"; else echo "daemon: not running"; fi
+	echo "watchdog job: last run $(date -r "$WATCHDOG_STAMP" '+%F %T' 2>/dev/null || echo unknown)"
 	vpn_is_up && echo "tailscale: on" || echo "tailscale: off"
 	res=$(desired_state)
 	echo "network: ${res#*|} -> want ${res%%|*}"

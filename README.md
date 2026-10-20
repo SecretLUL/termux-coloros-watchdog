@@ -15,7 +15,7 @@ The script still dies silently after a while, sometimes after minutes, sometimes
 
 ## What is actually happening
 
-On my device (OPPO PLG110, Android 16, ColorOS) Android records the kill reason, and you can read it with adb:
+On my device (OPPO PLG110, ColorOS, Android 16 and since October 2026 Android 17) Android records the kill reason, and you can read it with adb:
 
 ```
 $ adb shell dumpsys activity exit-info com.termux
@@ -45,6 +45,26 @@ ColorOS's battery manager force-stops Termux:Boot, probably because it has no UI
 
 Fix: open the Termux:Boot app once, or run `adb shell am start -n com.termux.boot/.BootActivity`. Then check `stopped=` again.
 
+### Trap: Termux:API gets force-stopped, which deletes its jobs
+
+```
+$ adb shell dumpsys activity exit-info com.termux.api
+  timestamp=2026-10-16 12:10:22  process=com.termux.api
+  reason=13 (OTHER KILLS BY SYSTEM) subreason=21 (FORCE STOP)
+  description=stop com.termux.api due to highpower notify stop package not in recent from com.oplus.battery
+```
+
+Termux, Termux:API and Termux:Boot share one Linux user id. Android books Termux's wake lock on that user id and lists it under Termux:API:
+
+```
+$ adb shell dumpsys power | grep termux
+  10-16 11:44:09.411 - 10041 (com.termux.api,...) - ACQ termux:service-wakelock (partial)
+```
+
+Most likely ColorOS's battery manager rates the long-held wake lock as high power use and force-stops the package of that user id that is not in the recent apps, which is Termux:API. A force-stop deletes all scheduled jobs of the app, so the watchdog below is gone. On my device this happened twice in two days. A day later an `o-kill` hit Termux, and nothing restarted the script for three days.
+
+Fix: let the long-running script schedule the watchdog job again when it notices that the job no longer runs, see [Self-healing](#self-healing-schedule-the-job-again).
+
 ## Diagnose your own device
 
 [`diagnose.sh`](diagnose.sh) is read-only and changes nothing. It prints the kill history, force-stop state, standby bucket, whitelist and phantom process settings for the Termux packages, plus the scheduled Termux:API jobs.
@@ -57,12 +77,14 @@ adb connect 127.0.0.1:<port>
 
 If you see `o-kill(...)` or another `OTHER KILLS BY SYSTEM` entry while all exemptions say yes/allow, you have the same problem.
 
+If `adb connect` prints `failed to connect` although the port is open, the pairing has expired: Android revokes it after 7 days without a connection, unless "Disable adb authorization timeout" is on in the developer options. Pair again with `adb pair 127.0.0.1:<port> <code>` ("Pair device with pairing code", use split screen so the dialog stays open).
+
 ## The workaround: a watchdog in a different package
 
 Since the kill cannot be prevented, the script is restarted automatically:
 
 - `termux-job-scheduler` (Termux:API) runs a watchdog script every **15 minutes**, which is the minimum Android allows for periodic jobs.
-- The job belongs to **Termux:API**, not to Termux. When Termux gets killed, the job survives and starts Termux again. A `o-kill` is not a force-stop, so scheduled jobs are kept.
+- The job belongs to **Termux:API**, not to Termux. When Termux gets killed, the job survives and starts Termux again. A `o-kill` is not a force-stop, so scheduled jobs are kept. A force-stop of Termux:API does delete them, see [the trap above](#trap-termuxapi-gets-force-stopped-which-deletes-its-jobs).
 - `--persisted true` keeps the job across reboots, so it also covers the case where Termux:Boot was force-stopped.
 - The watchdog runs your command in the **foreground**. That makes it a Termux task, which keeps Termux's foreground service up as long as it runs.
 
@@ -80,13 +102,24 @@ termux-job-scheduler --job-id 4711 \
 
 `--network none --battery-not-low false` is important: by default the job would wait for a network connection and a non-low battery.
 
-Check that the job is registered. `termux-job-scheduler -p` printed nothing for me, so use adb:
+Check that the job is registered with adb. With a `--network none` job scheduled, `termux-job-scheduler -p` prints nothing and `termux-job-scheduler --cancel` silently does nothing (Termux:API 0.53.0). Only "No jobs found" is reliable.
 
 ```sh
-adb shell dumpsys jobscheduler | grep -A8 'JOB #.*/4711'
+adb shell dumpsys jobscheduler | grep -A8 'JOB #.*/4711'    # is it there?
+adb shell cmd jobscheduler run -f -u 0 com.termux.api 4711  # run it now
+adb shell cmd jobscheduler cancel -u 0 com.termux.api 4711  # delete it
 ```
 
-Test it by killing your daemon with `kill -9 <pid>`, then schedule a one-shot job with the same script (e.g. `--job-id 4712`, no `--period-ms`). The one-shot job runs within seconds.
+Test it by killing your daemon with `kill -9 <pid>`, then run the job now with the `cmd jobscheduler run` line above. Without adb, schedule a one-shot job with the same script instead (e.g. `--job-id 4712`, no `--period-ms`). It runs within seconds.
+
+### Self-healing: schedule the job again
+
+The job cannot bring itself back after a force-stop of Termux:API, but your long-running script can, because the force-stop does not kill Termux. The pattern:
+
+- The watchdog touches a stamp file on every run.
+- The script checks the stamp every few minutes. If the job has not run for 45 minutes, it schedules the job again with the same `termux-job-scheduler` command. Scheduling the same job id again just replaces the job.
+
+The VPN example below does this, see `schedule_watchdog` and the check in `run_loop`.
 
 ### Real-world result
 
@@ -104,14 +137,14 @@ The daemon was back after 15 minutes without anyone opening Termux.
 
 - **Up to ~15 minutes downtime** after a kill. Shorter periodic jobs are not possible. Staggering several jobs does not help, because each job may run anywhere in its 15-minute window and Android batches them.
 - In deep **Doze** (phone lying unused, screen off), jobs are deferred to maintenance windows, even for whitelisted apps.
-- If ColorOS ever **force-stops Termux:API**, its jobs are deleted and the watchdog is gone. I have only seen `o-kill`s for it so far, not force-stops.
-- Findings are from **one device** over a few days. Reports from other devices are welcome, see below.
+- If ColorOS **force-stops Termux:API** and also kills Termux before the script has scheduled the job again (up to ~50 minutes with self-healing), nothing restarts it until you open Termux or reboot.
+- Findings are from **one device** over about three weeks. Reports from other devices are welcome, see below.
 
 ## Example: VPN on Demand for Tailscale
 
 [`examples/vpn-on-demand`](examples/vpn-on-demand) is the script that started this: an iOS-style "VPN on Demand" for the Tailscale Android app. Tailscale is switched off on trusted home Wi-Fi and on everywhere else (mobile data, foreign Wi-Fi), via Tailscale's `CONNECT_VPN` / `DISCONNECT_VPN` broadcast intents.
 
-It has its own `watchdog` subcommand: it writes a heartbeat every loop, so the log shows when the daemon was last alive before a kill. A `stop` disables the watchdog until the next `start`.
+It has its own `watchdog` subcommand: it writes a heartbeat every loop, so the log shows when the daemon was last alive before a kill. A `stop` disables the watchdog until the next `start`. It also heals the watchdog: if the job has not run for 45 minutes, the daemon schedules it again and logs `watchdog job did not run since ..., scheduling it again`. `vpn-on-demand status` shows the last job run.
 
 ```sh
 pkg install termux-api jq
